@@ -45,3 +45,19 @@ add_test(NAME test_search COMMAND test_search)
 add_executable(test_range tests/test_range.cpp)
 target_link_libraries(test_range bplustree)
 add_test(NAME test_range COMMAND test_range)
+
+add_executable(test_min_order tests/test_min_order.cpp)
+target_link_libraries(test_min_order bplustree)
+add_test(NAME test_min_order COMMAND test_min_order)
+
+add_executable(test_edge_cases tests/test_edge_cases.cpp)
+target_link_libraries(test_edge_cases bplustree)
+add_test(NAME test_edge_cases COMMAND test_edge_cases)
+
+add_executable(test_stress tests/test_stress.cpp)
+target_link_libraries(test_stress bplustree)
+add_test(NAME test_stress COMMAND test_stress)
+
+add_executable(test_validate tests/test_validate.cpp)
+target_link_libraries(test_validate bplustree)
+add_test(NAME test_validate COMMAND test_validate)
