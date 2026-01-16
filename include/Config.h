@@ -20,7 +20,7 @@ namespace bptree {
  * - Leaf nodes: up to 3 key-value pairs
  * - Minimum keys per node (except root): ceil(4/2) - 1 = 1
  */
-constexpr int DEFAULT_ORDER = 4;
+constexpr size_t DEFAULT_ORDER = 4;
 
 /**
  * @brief Minimum order allowed for B+ tree
@@ -31,7 +31,7 @@ constexpr int DEFAULT_ORDER = 4;
  * - Leaf nodes: up to 2 key-value pairs
  * - Minimum keys per node (except root): ceil(3/2) - 1 = 1
  */
-constexpr int MIN_ORDER = 3;
+constexpr size_t MIN_ORDER = 3;
 
 } // namespace bptree
 

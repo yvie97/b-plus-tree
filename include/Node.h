@@ -34,10 +34,10 @@ template<typename KeyType, typename ValueType>
 class Node {
 public:
     NodeType type;           ///< Type of this node (INTERNAL or LEAF)
-    int numKeys;             ///< Current number of keys in this node
+    size_t numKeys;          ///< Current number of keys in this node
     std::vector<KeyType> keys;  ///< Array of keys (sorted)
     Node* parent;            ///< Pointer to parent node (nullptr for root)
-    int maxKeys;             ///< Maximum number of keys this node can hold
+    size_t maxKeys;          ///< Maximum number of keys this node can hold
 
     /**
      * @brief Constructs a node with the specified type and maximum capacity
@@ -45,7 +45,7 @@ public:
      * @param t The type of node (INTERNAL or LEAF)
      * @param maxK Maximum number of keys (order - 1)
      */
-    Node(NodeType t, int maxK)
+    Node(NodeType t, size_t maxK)
         : type(t), numKeys(0), parent(nullptr), maxKeys(maxK) {
         // Pre-allocate to maxKeys + 1 to handle overflow during splits
         keys.resize(maxK + 1);
@@ -92,7 +92,7 @@ public:
      * @param minKeys The minimum number of keys required
      * @return true if numKeys < minKeys, false otherwise
      */
-    bool isUnderflow(int minKeys) const {
+    bool isUnderflow(size_t minKeys) const {
         return numKeys < minKeys;
     }
 
@@ -108,19 +108,22 @@ public:
      *
      * Time complexity: O(log numKeys)
      */
-    int findKeyPosition(const KeyType& key) const {
-        int left = 0, right = numKeys - 1;
-        int result = numKeys; // Default: insert at end
+    size_t findKeyPosition(const KeyType& key) const {
+        if (numKeys == 0) return 0;
+
+        size_t left = 0, right = numKeys - 1;
+        size_t result = numKeys; // Default: insert at end
 
         // Binary search for the position
         while (left <= right) {
-            int mid = left + (right - left) / 2;
+            size_t mid = left + (right - left) / 2;
             if (keys[mid] == key) {
                 return mid;
             } else if (keys[mid] < key) {
                 left = mid + 1;
             } else {
                 result = mid;
+                if (mid == 0) break;  // Prevent underflow
                 right = mid - 1;
             }
         }
@@ -138,9 +141,9 @@ public:
      *
      * Time complexity: O(numKeys)
      */
-    void insertKeyAt(int pos, const KeyType& key) {
+    void insertKeyAt(size_t pos, const KeyType& key) {
         // Shift elements to the right manually - O(n) but with better cache performance
-        for (int i = numKeys; i > pos; --i) {
+        for (size_t i = numKeys; i > pos; --i) {
             keys[i] = std::move(keys[i - 1]);
         }
         keys[pos] = key;
@@ -157,9 +160,9 @@ public:
      *
      * Time complexity: O(numKeys)
      */
-    void removeKeyAt(int pos) {
+    void removeKeyAt(size_t pos) {
         // Shift elements to the left manually - O(n) but with better cache performance
-        for (int i = pos; i < numKeys - 1; ++i) {
+        for (size_t i = pos; i < numKeys - 1; ++i) {
             keys[i] = std::move(keys[i + 1]);
         }
         numKeys--;
@@ -190,7 +193,7 @@ public:
      *
      * @param maxKeys Maximum number of keys (order - 1)
      */
-    InternalNode(int maxKeys)
+    InternalNode(size_t maxKeys)
         : Node<KeyType, ValueType>(NodeType::INTERNAL, maxKeys) {
         // Pre-allocate to maxKeys + 3 to handle overflow during splits
         // +3 because: during insertIntoParent, we first increment numKeys (making it maxKeys+1),
@@ -220,12 +223,12 @@ public:
      *
      * Time complexity: O(numKeys)
      */
-    void insertChildAt(int pos, Node<KeyType, ValueType>* child) {
+    void insertChildAt(size_t pos, Node<KeyType, ValueType>* child) {
         // Determine the current number of children
-        int numChildren = this->numKeys + 1;
+        size_t numChildren = this->numKeys + 1;
 
         // Shift children to the right manually
-        for (int i = numChildren; i > pos; --i) {
+        for (size_t i = numChildren; i > pos; --i) {
             children[i] = children[i - 1];
         }
         children[pos] = child;
@@ -243,12 +246,12 @@ public:
      *
      * Time complexity: O(numKeys)
      */
-    void removeChildAt(int pos) {
+    void removeChildAt(size_t pos) {
         // Determine the current number of children
-        int numChildren = this->numKeys + 1;
+        size_t numChildren = this->numKeys + 1;
 
         // Shift children to the left manually
-        for (int i = pos; i < numChildren - 1; ++i) {
+        for (size_t i = pos; i < numChildren - 1; ++i) {
             children[i] = children[i + 1];
         }
         children[numChildren - 1] = nullptr;
@@ -270,8 +273,8 @@ public:
      *
      * Time complexity: O(numKeys)
      */
-    int findChildIndex(const KeyType& key) const {
-        int i = 0;
+    size_t findChildIndex(const KeyType& key) const {
+        size_t i = 0;
         while (i < this->numKeys && key >= this->keys[i]) {
             i++;
         }
@@ -303,7 +306,7 @@ public:
      *
      * @param maxKeys Maximum number of keys (order - 1)
      */
-    LeafNode(int maxKeys)
+    LeafNode(size_t maxKeys)
         : Node<KeyType, ValueType>(NodeType::LEAF, maxKeys),
           next(nullptr), prev(nullptr) {
         // Pre-allocate to maxKeys + 1 to handle overflow during splits
@@ -326,15 +329,15 @@ public:
      *
      * Time complexity: O(numKeys)
      */
-    void insertAt(int pos, const KeyType& key, const ValueType& value) {
+    void insertAt(size_t pos, const KeyType& key, const ValueType& value) {
         // Shift keys manually
-        for (int i = this->numKeys; i > pos; --i) {
+        for (size_t i = this->numKeys; i > pos; --i) {
             this->keys[i] = std::move(this->keys[i - 1]);
         }
         this->keys[pos] = key;
 
         // Shift values manually
-        for (int i = this->numKeys; i > pos; --i) {
+        for (size_t i = this->numKeys; i > pos; --i) {
             values[i] = std::move(values[i - 1]);
         }
         values[pos] = value;
@@ -354,15 +357,15 @@ public:
      *
      * Time complexity: O(numKeys)
      */
-    void insertAt(int pos, KeyType&& key, ValueType&& value) {
+    void insertAt(size_t pos, KeyType&& key, ValueType&& value) {
         // Shift keys manually
-        for (int i = this->numKeys; i > pos; --i) {
+        for (size_t i = this->numKeys; i > pos; --i) {
             this->keys[i] = std::move(this->keys[i - 1]);
         }
         this->keys[pos] = std::move(key);
 
         // Shift values manually
-        for (int i = this->numKeys; i > pos; --i) {
+        for (size_t i = this->numKeys; i > pos; --i) {
             values[i] = std::move(values[i - 1]);
         }
         values[pos] = std::move(value);
@@ -379,12 +382,12 @@ public:
      *
      * Time complexity: O(numKeys)
      */
-    void removeAt(int pos) {
+    void removeAt(size_t pos) {
         // Shift keys (using parent class method)
         this->removeKeyAt(pos);
 
         // Shift values manually
-        for (int i = pos; i < this->numKeys; ++i) {
+        for (size_t i = pos; i < this->numKeys; ++i) {
             values[i] = std::move(values[i + 1]);
         }
     }
@@ -402,7 +405,7 @@ public:
      * Time complexity: O(numKeys)
      */
     bool findValue(const KeyType& key, ValueType& value) const {
-        for (int i = 0; i < this->numKeys; i++) {
+        for (size_t i = 0; i < this->numKeys; i++) {
             if (this->keys[i] == key) {
                 value = values[i];
                 return true;
