@@ -4,12 +4,16 @@
 #include "Node.h"
 #include "Config.h"
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <utility>
 #include <algorithm>
 #include <queue>
 #include <cassert>
 #include <iterator>
+#include <cstring>
+#include <stdexcept>
+#include <type_traits>
 
 namespace bptree {
 
@@ -589,6 +593,78 @@ public:
     void bulkLoad(std::vector<std::pair<KeyType, ValueType>>&& data) {
         bulkLoad(std::make_move_iterator(data.begin()), std::make_move_iterator(data.end()));
     }
+
+    // ==================== Persistence Methods ====================
+
+    /**
+     * @brief Saves the B+ tree to a binary file
+     *
+     * Serializes the tree to a compact binary format that can be loaded later.
+     * The file format includes a header with magic number, version, and tree order,
+     * followed by all key-value pairs in sorted order.
+     *
+     * Requirements for KeyType and ValueType:
+     * - Must be trivially copyable (std::is_trivially_copyable)
+     * - This includes primitive types (int, double, etc.), C-style arrays, and
+     *   simple structs without pointers or virtual functions
+     * - For complex types (std::string, containers), use a custom serialization approach
+     *
+     * @param filename Path to the file to save to (will be overwritten if exists)
+     * @throws std::runtime_error If the file cannot be opened or written
+     * @throws std::logic_error If KeyType or ValueType is not trivially copyable
+     *
+     * Time complexity: O(n) where n is the number of key-value pairs
+     * Space complexity: O(1) additional memory (streams directly to file)
+     *
+     * @code
+     * BPlusTree<int, double> tree;
+     * tree.insert(1, 1.5);
+     * tree.insert(2, 2.5);
+     * tree.save("tree.dat");
+     * @endcode
+     */
+    void save(const std::string& filename) const;
+
+    /**
+     * @brief Loads a B+ tree from a binary file
+     *
+     * Deserializes a tree that was previously saved with save().
+     * The current tree contents are replaced with the loaded data.
+     * Uses bulk loading for efficient O(n) reconstruction.
+     *
+     * @param filename Path to the file to load from
+     * @throws std::runtime_error If the file cannot be opened, is corrupted,
+     *         or has an incompatible format/version
+     * @throws std::logic_error If KeyType or ValueType is not trivially copyable,
+     *         or if the file was saved with a different order than this tree
+     *
+     * Time complexity: O(n) where n is the number of key-value pairs
+     * Space complexity: O(n) to hold data during bulk loading
+     *
+     * @code
+     * BPlusTree<int, double> tree;
+     * tree.load("tree.dat");
+     * @endcode
+     */
+    void load(const std::string& filename);
+
+    /**
+     * @brief Creates a new B+ tree by loading from a binary file
+     *
+     * Static factory method that creates a new tree with the order specified
+     * in the saved file.
+     *
+     * @param filename Path to the file to load from
+     * @return A new BPlusTree containing the loaded data
+     * @throws std::runtime_error If the file cannot be opened, is corrupted,
+     *         or has an incompatible format/version
+     * @throws std::logic_error If KeyType or ValueType is not trivially copyable
+     *
+     * @code
+     * auto tree = BPlusTree<int, double>::loadFromFile("tree.dat");
+     * @endcode
+     */
+    static BPlusTree loadFromFile(const std::string& filename);
 
     // Iterator methods
 
@@ -1804,6 +1880,207 @@ void BPlusTree<KeyType, ValueType>::bulkLoad(InputIterator first, InputIterator 
         root = nullptr;
         throw;
     }
+}
+
+// ==================== Persistence Implementation ====================
+
+// File format constants
+namespace detail {
+    constexpr uint32_t BPTREE_MAGIC = 0x54504221;  // "!BPT" in little-endian
+    constexpr uint32_t BPTREE_VERSION = 1;
+}
+
+template<typename KeyType, typename ValueType>
+void BPlusTree<KeyType, ValueType>::save(const std::string& filename) const {
+    // Compile-time check for trivially copyable types
+    static_assert(std::is_trivially_copyable<KeyType>::value,
+                  "KeyType must be trivially copyable for binary serialization. "
+                  "For complex types like std::string, use custom serialization.");
+    static_assert(std::is_trivially_copyable<ValueType>::value,
+                  "ValueType must be trivially copyable for binary serialization. "
+                  "For complex types like std::string, use custom serialization.");
+
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("Failed to open file for writing: " + filename);
+    }
+
+    // Write header
+    uint32_t magic = detail::BPTREE_MAGIC;
+    uint32_t version = detail::BPTREE_VERSION;
+    file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+    file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+    // Write tree metadata
+    file.write(reinterpret_cast<const char*>(&order), sizeof(order));
+
+    // Count total elements by traversing leaves
+    size_t count = 0;
+    const LeafNode<KeyType, ValueType>* leaf = getFirstLeaf();
+    while (leaf) {
+        count += leaf->numKeys;
+        leaf = leaf->next;
+    }
+
+    // Write element count
+    file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+
+    // Write all key-value pairs by traversing the leaf linked list
+    leaf = getFirstLeaf();
+    while (leaf) {
+        for (size_t i = 0; i < leaf->numKeys; ++i) {
+            file.write(reinterpret_cast<const char*>(&leaf->keys[i]), sizeof(KeyType));
+            file.write(reinterpret_cast<const char*>(&leaf->values[i]), sizeof(ValueType));
+        }
+        leaf = leaf->next;
+    }
+
+    if (!file) {
+        throw std::runtime_error("Failed to write to file: " + filename);
+    }
+
+    file.close();
+}
+
+template<typename KeyType, typename ValueType>
+void BPlusTree<KeyType, ValueType>::load(const std::string& filename) {
+    // Compile-time check for trivially copyable types
+    static_assert(std::is_trivially_copyable<KeyType>::value,
+                  "KeyType must be trivially copyable for binary serialization. "
+                  "For complex types like std::string, use custom serialization.");
+    static_assert(std::is_trivially_copyable<ValueType>::value,
+                  "ValueType must be trivially copyable for binary serialization. "
+                  "For complex types like std::string, use custom serialization.");
+
+    std::ifstream file(filename, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("Failed to open file for reading: " + filename);
+    }
+
+    // Read and validate header
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    file.read(reinterpret_cast<char*>(&version), sizeof(version));
+
+    if (magic != detail::BPTREE_MAGIC) {
+        throw std::runtime_error("Invalid file format: not a B+ tree file");
+    }
+
+    if (version != detail::BPTREE_VERSION) {
+        throw std::runtime_error("Incompatible file version: expected " +
+                                 std::to_string(detail::BPTREE_VERSION) +
+                                 ", got " + std::to_string(version));
+    }
+
+    // Read tree metadata
+    size_t fileOrder = 0;
+    file.read(reinterpret_cast<char*>(&fileOrder), sizeof(fileOrder));
+
+    if (fileOrder != order) {
+        throw std::logic_error("Tree order mismatch: file has order " +
+                               std::to_string(fileOrder) +
+                               ", but this tree has order " +
+                               std::to_string(order) +
+                               ". Use loadFromFile() to create a tree with the file's order.");
+    }
+
+    // Read element count
+    size_t count = 0;
+    file.read(reinterpret_cast<char*>(&count), sizeof(count));
+
+    if (!file) {
+        throw std::runtime_error("Failed to read file header: " + filename);
+    }
+
+    // Read all key-value pairs
+    std::vector<std::pair<KeyType, ValueType>> data;
+    data.reserve(count);
+
+    for (size_t i = 0; i < count; ++i) {
+        KeyType key;
+        ValueType value;
+        file.read(reinterpret_cast<char*>(&key), sizeof(KeyType));
+        file.read(reinterpret_cast<char*>(&value), sizeof(ValueType));
+
+        if (!file) {
+            throw std::runtime_error("Unexpected end of file or read error at element " +
+                                     std::to_string(i));
+        }
+
+        data.emplace_back(std::move(key), std::move(value));
+    }
+
+    // Use bulk loading to reconstruct the tree (data is already sorted)
+    bulkLoad(std::move(data));
+}
+
+template<typename KeyType, typename ValueType>
+BPlusTree<KeyType, ValueType> BPlusTree<KeyType, ValueType>::loadFromFile(const std::string& filename) {
+    // Compile-time check for trivially copyable types
+    static_assert(std::is_trivially_copyable<KeyType>::value,
+                  "KeyType must be trivially copyable for binary serialization. "
+                  "For complex types like std::string, use custom serialization.");
+    static_assert(std::is_trivially_copyable<ValueType>::value,
+                  "ValueType must be trivially copyable for binary serialization. "
+                  "For complex types like std::string, use custom serialization.");
+
+    std::ifstream file(filename, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("Failed to open file for reading: " + filename);
+    }
+
+    // Read and validate header
+    uint32_t magic = 0;
+    uint32_t version = 0;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    file.read(reinterpret_cast<char*>(&version), sizeof(version));
+
+    if (magic != detail::BPTREE_MAGIC) {
+        throw std::runtime_error("Invalid file format: not a B+ tree file");
+    }
+
+    if (version != detail::BPTREE_VERSION) {
+        throw std::runtime_error("Incompatible file version: expected " +
+                                 std::to_string(detail::BPTREE_VERSION) +
+                                 ", got " + std::to_string(version));
+    }
+
+    // Read tree metadata
+    size_t fileOrder = 0;
+    file.read(reinterpret_cast<char*>(&fileOrder), sizeof(fileOrder));
+
+    // Read element count
+    size_t count = 0;
+    file.read(reinterpret_cast<char*>(&count), sizeof(count));
+
+    if (!file) {
+        throw std::runtime_error("Failed to read file header: " + filename);
+    }
+
+    // Read all key-value pairs
+    std::vector<std::pair<KeyType, ValueType>> data;
+    data.reserve(count);
+
+    for (size_t i = 0; i < count; ++i) {
+        KeyType key;
+        ValueType value;
+        file.read(reinterpret_cast<char*>(&key), sizeof(KeyType));
+        file.read(reinterpret_cast<char*>(&value), sizeof(ValueType));
+
+        if (!file) {
+            throw std::runtime_error("Unexpected end of file or read error at element " +
+                                     std::to_string(i));
+        }
+
+        data.emplace_back(std::move(key), std::move(value));
+    }
+
+    // Create tree with the order from the file
+    BPlusTree<KeyType, ValueType> tree(fileOrder);
+    tree.bulkLoad(std::move(data));
+
+    return tree;
 }
 
 } // namespace bptree

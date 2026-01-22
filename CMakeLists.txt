@@ -72,3 +72,7 @@ add_test(NAME test_iterator COMMAND test_iterator)
 add_executable(test_bulk_load tests/test_bulk_load.cpp)
 target_link_libraries(test_bulk_load bplustree)
 add_test(NAME test_bulk_load COMMAND test_bulk_load)
+
+add_executable(test_persistence tests/test_persistence.cpp)
+target_link_libraries(test_persistence bplustree)
+add_test(NAME test_persistence COMMAND test_persistence)
