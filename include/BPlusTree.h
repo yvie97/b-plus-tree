@@ -14,11 +14,12 @@
 #include <cstring>
 #include <stdexcept>
 #include <type_traits>
+#include <memory>
 
 namespace bptree {
 
 // Forward declaration
-template<typename KeyType, typename ValueType>
+template<typename KeyType, typename ValueType, typename Allocator>
 class BPlusTree;
 
 /**
@@ -52,7 +53,8 @@ private:
     size_t index;                  ///< Current index within the leaf node
     mutable value_type cached_pair; ///< Mutable cache for dereference operations
 
-    friend class BPlusTree<KeyType, ValueType>;
+    template<typename K, typename V, typename A>
+    friend class BPlusTree;
 
     /**
      * @brief Private constructor for creating iterators
@@ -183,7 +185,7 @@ public:
 };
 
 // Forward declaration of BPlusTree for friend declaration
-template<typename KeyType, typename ValueType>
+template<typename KeyType, typename ValueType, typename Allocator>
 class BPlusTree;
 
 /**
@@ -212,7 +214,8 @@ private:
     size_t index;  // Points to actual element (not one-past like forward iterator's end)
     mutable value_type cached_pair;
 
-    friend class BPlusTree<KeyType, ValueType>;
+    template<typename K, typename V, typename A>
+    friend class BPlusTree;
 
     BPlusTreeReverseIterator(leaf_node_type* leaf, size_t idx)
         : current_leaf(leaf), index(idx), cached_pair() {}
@@ -309,6 +312,7 @@ public:
  *
  * @tparam KeyType The type of keys stored in the tree. Must support comparison operators (<, >=, ==).
  * @tparam ValueType The type of values associated with keys.
+ * @tparam Allocator The allocator type used for memory management. Defaults to std::allocator.
  *
  * Exception Safety Guarantees:
  * - Constructor: Strong guarantee - either succeeds or no tree is created
@@ -324,10 +328,22 @@ public:
  * - Must be copyable or movable
  * - Copy/move operations may throw, but should leave objects in valid state
  * - For best exception safety, prefer move semantics
+ *
+ * Custom Allocator Support:
+ * - The allocator is used for all node allocations (LeafNode and InternalNode)
+ * - Follows standard C++ allocator conventions with rebind support
+ * - Allocator is propagated during move operations based on allocator_traits
  */
-template<typename KeyType, typename ValueType>
+template<typename KeyType, typename ValueType,
+         typename Allocator = std::allocator<std::pair<const KeyType, ValueType>>>
 class BPlusTree {
 public:
+    // Type definitions
+    using key_type = KeyType;
+    using mapped_type = ValueType;
+    using value_type = std::pair<const KeyType, ValueType>;
+    using allocator_type = Allocator;
+
     // Iterator type definitions
     using iterator = BPlusTreeIterator<KeyType, ValueType, false>;
     using const_iterator = BPlusTreeIterator<KeyType, ValueType, true>;
@@ -335,10 +351,20 @@ public:
     using const_reverse_iterator = BPlusTreeReverseIterator<KeyType, ValueType, true>;
 
 private:
+    // Allocator type aliases using rebind for node types
+    using LeafNodeAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<LeafNode<KeyType, ValueType>>;
+    using InternalNodeAllocator = typename std::allocator_traits<Allocator>::template rebind_alloc<InternalNode<KeyType, ValueType>>;
+    using LeafNodeAllocTraits = std::allocator_traits<LeafNodeAllocator>;
+    using InternalNodeAllocTraits = std::allocator_traits<InternalNodeAllocator>;
+
     Node<KeyType, ValueType>* root;
     size_t order;      // m
     size_t maxKeys;    // m - 1
     size_t minKeys;    // ⌈m/2⌉ - 1
+
+    // Allocators for node types
+    LeafNodeAllocator leaf_allocator;
+    InternalNodeAllocator internal_allocator;
 
     // Helper functions
     LeafNode<KeyType, ValueType>* findLeaf(const KeyType& key);
@@ -365,19 +391,40 @@ private:
     LeafNode<KeyType, ValueType>* getLastLeaf();
     const LeafNode<KeyType, ValueType>* getLastLeaf() const;
 
+    // Allocator helper methods for node allocation/deallocation
+    LeafNode<KeyType, ValueType>* allocateLeafNode();
+    void deallocateLeafNode(LeafNode<KeyType, ValueType>* node);
+    InternalNode<KeyType, ValueType>* allocateInternalNode();
+    void deallocateInternalNode(InternalNode<KeyType, ValueType>* node);
+
 public:
     /**
-     * @brief Constructs a B+ Tree with the specified order
+     * @brief Constructs a B+ Tree with the specified order and allocator
      *
      * @param order The order of the B+ tree (maximum number of children per node).
      *              Must be at least MIN_ORDER (3). If a smaller value is provided,
      *              MIN_ORDER will be used instead. Default is DEFAULT_ORDER (4).
+     * @param alloc The allocator to use for node memory management. Default constructs
+     *              an allocator if not provided.
      *
      * Time complexity: O(1)
      * Space complexity: O(1)
      * Exception safety: Strong guarantee
      */
-    explicit BPlusTree(size_t order = DEFAULT_ORDER);
+    explicit BPlusTree(size_t order = DEFAULT_ORDER,
+                       const Allocator& alloc = Allocator());
+
+    /**
+     * @brief Returns a copy of the allocator used by this tree
+     *
+     * @return A copy of the allocator
+     *
+     * Time complexity: O(1)
+     * Exception safety: No-throw guarantee
+     */
+    allocator_type get_allocator() const noexcept {
+        return allocator_type(leaf_allocator);
+    }
 
     /**
      * @brief Destroys the B+ Tree and deallocates all nodes
@@ -408,21 +455,27 @@ public:
      *              but empty state.
      *
      * Time complexity: O(1)
-     * Exception safety: No-throw guarantee (noexcept)
+     * Exception safety: No-throw guarantee (noexcept) if allocator move is noexcept
      */
-    BPlusTree(BPlusTree&& other) noexcept;
+    BPlusTree(BPlusTree&& other) noexcept(
+        std::is_nothrow_move_constructible<LeafNodeAllocator>::value &&
+        std::is_nothrow_move_constructible<InternalNodeAllocator>::value);
 
     /**
      * @brief Move assignment operator for efficient transfer of ownership
+     *
+     * Allocator propagation follows std::allocator_traits::propagate_on_container_move_assignment.
      *
      * @param other The tree to move from. After the move, other will be in a valid
      *              but empty state.
      * @return Reference to this tree
      *
      * Time complexity: O(n) where n is the number of nodes in the current tree (for cleanup)
-     * Exception safety: No-throw guarantee (noexcept)
+     * Exception safety: No-throw guarantee (noexcept) if allocator operations are noexcept
      */
-    BPlusTree& operator=(BPlusTree&& other) noexcept;
+    BPlusTree& operator=(BPlusTree&& other) noexcept(
+        std::allocator_traits<LeafNodeAllocator>::propagate_on_container_move_assignment::value ||
+        std::allocator_traits<LeafNodeAllocator>::is_always_equal::value);
 
     /**
      * @brief Searches for a key in the tree
@@ -834,9 +887,9 @@ public:
 };
 
 // Constructor
-template<typename KeyType, typename ValueType>
-BPlusTree<KeyType, ValueType>::BPlusTree(size_t ord)
-    : root(nullptr), order(ord) {
+template<typename KeyType, typename ValueType, typename Allocator>
+BPlusTree<KeyType, ValueType, Allocator>::BPlusTree(size_t ord, const Allocator& alloc)
+    : root(nullptr), order(ord), leaf_allocator(alloc), internal_allocator(alloc) {
     if (order < MIN_ORDER) {
         order = MIN_ORDER;
     }
@@ -845,15 +898,19 @@ BPlusTree<KeyType, ValueType>::BPlusTree(size_t ord)
 }
 
 // Destructor
-template<typename KeyType, typename ValueType>
-BPlusTree<KeyType, ValueType>::~BPlusTree() {
+template<typename KeyType, typename ValueType, typename Allocator>
+BPlusTree<KeyType, ValueType, Allocator>::~BPlusTree() {
     destroyTree(root);
 }
 
 // Move constructor
-template<typename KeyType, typename ValueType>
-BPlusTree<KeyType, ValueType>::BPlusTree(BPlusTree&& other) noexcept
-    : root(other.root), order(other.order), maxKeys(other.maxKeys), minKeys(other.minKeys) {
+template<typename KeyType, typename ValueType, typename Allocator>
+BPlusTree<KeyType, ValueType, Allocator>::BPlusTree(BPlusTree&& other) noexcept(
+    std::is_nothrow_move_constructible<LeafNodeAllocator>::value &&
+    std::is_nothrow_move_constructible<InternalNodeAllocator>::value)
+    : root(other.root), order(other.order), maxKeys(other.maxKeys), minKeys(other.minKeys),
+      leaf_allocator(std::move(other.leaf_allocator)),
+      internal_allocator(std::move(other.internal_allocator)) {
     other.root = nullptr;
     other.order = DEFAULT_ORDER;
     other.maxKeys = DEFAULT_ORDER - 1;
@@ -861,11 +918,21 @@ BPlusTree<KeyType, ValueType>::BPlusTree(BPlusTree&& other) noexcept
 }
 
 // Move assignment operator
-template<typename KeyType, typename ValueType>
-BPlusTree<KeyType, ValueType>& BPlusTree<KeyType, ValueType>::operator=(BPlusTree&& other) noexcept {
+template<typename KeyType, typename ValueType, typename Allocator>
+BPlusTree<KeyType, ValueType, Allocator>&
+BPlusTree<KeyType, ValueType, Allocator>::operator=(BPlusTree&& other) noexcept(
+    std::allocator_traits<LeafNodeAllocator>::propagate_on_container_move_assignment::value ||
+    std::allocator_traits<LeafNodeAllocator>::is_always_equal::value) {
     if (this != &other) {
         // Clean up existing tree
         destroyTree(root);
+
+        // Handle allocator propagation
+        using PropagateAlloc = typename std::allocator_traits<LeafNodeAllocator>::propagate_on_container_move_assignment;
+        if (PropagateAlloc::value) {
+            leaf_allocator = std::move(other.leaf_allocator);
+            internal_allocator = std::move(other.internal_allocator);
+        }
 
         // Move data from other
         root = other.root;
@@ -882,8 +949,8 @@ BPlusTree<KeyType, ValueType>& BPlusTree<KeyType, ValueType>::operator=(BPlusTre
     return *this;
 }
 
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::destroyTree(Node<KeyType, ValueType>* node) {
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::destroyTree(Node<KeyType, ValueType>* node) {
     if (!node) return;
 
     if (node->isInternal()) {
@@ -897,21 +964,23 @@ void BPlusTree<KeyType, ValueType>::destroyTree(Node<KeyType, ValueType>* node) 
                 destroyTree(internal->children[i]);
             }
         }
+        deallocateInternalNode(internal);
+    } else {
+        deallocateLeafNode(static_cast<LeafNode<KeyType, ValueType>*>(node));
     }
-    delete node;
 }
 
 // Search operation
-template<typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::search(const KeyType& key, ValueType& value) const {
+template<typename KeyType, typename ValueType, typename Allocator>
+bool BPlusTree<KeyType, ValueType, Allocator>::search(const KeyType& key, ValueType& value) const {
     if (!root) return false;
 
     const LeafNode<KeyType, ValueType>* leaf = findLeaf(key);
     return leaf->findValue(key, value);
 }
 
-template<typename KeyType, typename ValueType>
-LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::findLeaf(const KeyType& key) {
+template<typename KeyType, typename ValueType, typename Allocator>
+LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType, Allocator>::findLeaf(const KeyType& key) {
     Node<KeyType, ValueType>* current = root;
 
     while (current && current->isInternal()) {
@@ -926,8 +995,8 @@ LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::findLeaf(const KeyT
     return static_cast<LeafNode<KeyType, ValueType>*>(current);
 }
 
-template<typename KeyType, typename ValueType>
-const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::findLeaf(const KeyType& key) const {
+template<typename KeyType, typename ValueType, typename Allocator>
+const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType, Allocator>::findLeaf(const KeyType& key) const {
     const Node<KeyType, ValueType>* current = root;
 
     while (current && current->isInternal()) {
@@ -943,11 +1012,11 @@ const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::findLeaf(cons
 }
 
 // Insert operation
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::insert(const KeyType& key, const ValueType& value) {
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::insert(const KeyType& key, const ValueType& value) {
     // Empty tree case
     if (!root) {
-        root = new LeafNode<KeyType, ValueType>(maxKeys);
+        root = allocateLeafNode();
         assert(root->isLeaf() && "Root should be a leaf node");
         LeafNode<KeyType, ValueType>* leaf = static_cast<LeafNode<KeyType, ValueType>*>(root);
         leaf->insertAt(0, key, value);
@@ -974,13 +1043,13 @@ void BPlusTree<KeyType, ValueType>::insert(const KeyType& key, const ValueType& 
     }
 }
 
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::splitLeaf(LeafNode<KeyType, ValueType>* leaf) {
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::splitLeaf(LeafNode<KeyType, ValueType>* leaf) {
     // Create new leaf node
     LeafNode<KeyType, ValueType>* newLeaf = nullptr;
 
     try {
-        newLeaf = new LeafNode<KeyType, ValueType>(maxKeys);
+        newLeaf = allocateLeafNode();
 
         // Calculate split point
         size_t splitPoint = (maxKeys + 1) / 2;
@@ -1010,13 +1079,13 @@ void BPlusTree<KeyType, ValueType>::splitLeaf(LeafNode<KeyType, ValueType>* leaf
         insertIntoParent(leaf, promoteKey, newLeaf);
     } catch (...) {
         // If an exception occurs, clean up the new leaf
-        delete newLeaf;
+        if (newLeaf) deallocateLeafNode(newLeaf);
         throw; // Re-throw the exception
     }
 }
 
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::splitInternal(InternalNode<KeyType, ValueType>* node) {
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::splitInternal(InternalNode<KeyType, ValueType>* node) {
     // Create new internal node
     InternalNode<KeyType, ValueType>* newNode = nullptr;
 
@@ -1025,7 +1094,7 @@ void BPlusTree<KeyType, ValueType>::splitInternal(InternalNode<KeyType, ValueTyp
     size_t numOriginalChildren = node->numKeys + 1;
 
     try {
-        newNode = new InternalNode<KeyType, ValueType>(maxKeys);
+        newNode = allocateInternalNode();
 
         // Key to promote to parent
         KeyType promoteKey = node->keys[splitPoint];
@@ -1069,22 +1138,21 @@ void BPlusTree<KeyType, ValueType>::splitInternal(InternalNode<KeyType, ValueTyp
             }
             // Restore original numKeys
             node->numKeys = numOriginalChildren - 1;
-            delete newNode;
+            deallocateInternalNode(newNode);
         }
         throw; // Re-throw the exception
     }
 }
 
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::insertIntoParent(
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::insertIntoParent(
     Node<KeyType, ValueType>* left,
     const KeyType& key,
     Node<KeyType, ValueType>* right) {
 
     // If left is root, create new root
     if (left->parent == nullptr) {
-        InternalNode<KeyType, ValueType>* newRoot =
-            new InternalNode<KeyType, ValueType>(maxKeys);
+        InternalNode<KeyType, ValueType>* newRoot = allocateInternalNode();
         newRoot->keys[0] = key;
         newRoot->numKeys = 1;
         newRoot->children[0] = left;
@@ -1110,8 +1178,8 @@ void BPlusTree<KeyType, ValueType>::insertIntoParent(
 }
 
 // Delete operation
-template<typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::remove(const KeyType& key) {
+template<typename KeyType, typename ValueType, typename Allocator>
+bool BPlusTree<KeyType, ValueType, Allocator>::remove(const KeyType& key) {
     if (!root) return false;
 
     LeafNode<KeyType, ValueType>* leaf = findLeaf(key);
@@ -1137,7 +1205,7 @@ bool BPlusTree<KeyType, ValueType>::remove(const KeyType& key) {
     if (leaf == root) {
         // Root can have fewer keys
         if (leaf->numKeys == 0) {
-            delete root;
+            deallocateLeafNode(leaf);
             root = nullptr;
         }
         return true;
@@ -1150,8 +1218,8 @@ bool BPlusTree<KeyType, ValueType>::remove(const KeyType& key) {
     return true;
 }
 
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::deleteEntry(Node<KeyType, ValueType>* node) {
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::deleteEntry(Node<KeyType, ValueType>* node) {
     if (node == root) {
         if (node->numKeys == 0) {
             if (node->isInternal()) {
@@ -1164,10 +1232,11 @@ void BPlusTree<KeyType, ValueType>::deleteEntry(Node<KeyType, ValueType>* node) 
                 } else {
                     root = nullptr;
                 }
+                deallocateInternalNode(internal);
             } else {
+                deallocateLeafNode(static_cast<LeafNode<KeyType, ValueType>*>(node));
                 root = nullptr;
             }
-            delete node;
         }
         return;
     }
@@ -1241,8 +1310,8 @@ void BPlusTree<KeyType, ValueType>::deleteEntry(Node<KeyType, ValueType>* node) 
  * @param parentIndex Index of the separator key in the parent
  * @param isLeftSibling Unused parameter (kept for consistency with redistributeNodes)
  */
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::mergeNodes(
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::mergeNodes(
     Node<KeyType, ValueType>* left,
     Node<KeyType, ValueType>* right,
     int parentIndex,
@@ -1273,7 +1342,7 @@ void BPlusTree<KeyType, ValueType>::mergeNodes(
         }
 
         // Step 3: Delete the now-empty right leaf
-        delete rightLeaf;
+        deallocateLeafNode(rightLeaf);
     } else {
         assert(left->isInternal() && right->isInternal() && "Both nodes must be internal");
         InternalNode<KeyType, ValueType>* leftInternal =
@@ -1319,7 +1388,7 @@ void BPlusTree<KeyType, ValueType>::mergeNodes(
         }
 
         // Step 5: Delete the now-empty right internal node
-        delete rightInternal;
+        deallocateInternalNode(rightInternal);
     }
 
     // Step 6: Remove separator key and right child pointer from parent
@@ -1365,8 +1434,8 @@ void BPlusTree<KeyType, ValueType>::mergeNodes(
  * @param parentIndex Index of the separator key in the parent
  * @param isLeftSibling True if borrowing from left sibling, false for right
  */
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::redistributeNodes(
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::redistributeNodes(
     Node<KeyType, ValueType>* node,
     Node<KeyType, ValueType>* sibling,
     int parentIndex,
@@ -1485,8 +1554,8 @@ void BPlusTree<KeyType, ValueType>::redistributeNodes(
     }
 }
 
-template<typename KeyType, typename ValueType>
-int BPlusTree<KeyType, ValueType>::getNodeIndex(Node<KeyType, ValueType>* node) {
+template<typename KeyType, typename ValueType, typename Allocator>
+int BPlusTree<KeyType, ValueType, Allocator>::getNodeIndex(Node<KeyType, ValueType>* node) {
     InternalNode<KeyType, ValueType>* parent =
         static_cast<InternalNode<KeyType, ValueType>*>(node->parent);
 
@@ -1501,8 +1570,8 @@ int BPlusTree<KeyType, ValueType>::getNodeIndex(Node<KeyType, ValueType>* node) 
 }
 
 // Range query
-template<typename KeyType, typename ValueType>
-std::vector<std::pair<KeyType, ValueType>> BPlusTree<KeyType, ValueType>::rangeQuery(
+template<typename KeyType, typename ValueType, typename Allocator>
+std::vector<std::pair<KeyType, ValueType>> BPlusTree<KeyType, ValueType, Allocator>::rangeQuery(
     const KeyType& start,
     const KeyType& end) const {
 
@@ -1529,8 +1598,8 @@ std::vector<std::pair<KeyType, ValueType>> BPlusTree<KeyType, ValueType>::rangeQ
 }
 
 // Utility functions
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::print() const {
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::print() const {
     if (!root) {
         std::cout << "Empty tree" << std::endl;
         return;
@@ -1538,8 +1607,8 @@ void BPlusTree<KeyType, ValueType>::print() const {
     printNode(root, 0);
 }
 
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::printNode(const Node<KeyType, ValueType>* node, int level) const {
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::printNode(const Node<KeyType, ValueType>* node, int level) const {
     if (!node) return;
 
     std::cout << "Level " << level << ": [";
@@ -1564,8 +1633,8 @@ void BPlusTree<KeyType, ValueType>::printNode(const Node<KeyType, ValueType>* no
     }
 }
 
-template<typename KeyType, typename ValueType>
-size_t BPlusTree<KeyType, ValueType>::height() const {
+template<typename KeyType, typename ValueType, typename Allocator>
+size_t BPlusTree<KeyType, ValueType, Allocator>::height() const {
     if (!root) return 0;
 
     size_t h = 1;
@@ -1580,17 +1649,17 @@ size_t BPlusTree<KeyType, ValueType>::height() const {
     return h;
 }
 
-template<typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::validate() const {
+template<typename KeyType, typename ValueType, typename Allocator>
+bool BPlusTree<KeyType, ValueType, Allocator>::validate() const {
     if (!root) return true;
 
     int leafLevel = -1;
     return validateNode(root, 0, leafLevel);
 }
 
-template<typename KeyType, typename ValueType>
-bool BPlusTree<KeyType, ValueType>::validateNode(const Node<KeyType, ValueType>* node,
-                                                   int level, int& leafLevel) const {
+template<typename KeyType, typename ValueType, typename Allocator>
+bool BPlusTree<KeyType, ValueType, Allocator>::validateNode(const Node<KeyType, ValueType>* node,
+                                                              int level, int& leafLevel) const {
     if (!node) return true;
 
     // Check key count bounds
@@ -1635,8 +1704,8 @@ bool BPlusTree<KeyType, ValueType>::validateNode(const Node<KeyType, ValueType>*
 }
 
 // Helper methods for iterators
-template<typename KeyType, typename ValueType>
-LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::getFirstLeaf() {
+template<typename KeyType, typename ValueType, typename Allocator>
+LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType, Allocator>::getFirstLeaf() {
     if (!root) return nullptr;
 
     Node<KeyType, ValueType>* current = root;
@@ -1651,8 +1720,8 @@ LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::getFirstLeaf() {
     return static_cast<LeafNode<KeyType, ValueType>*>(current);
 }
 
-template<typename KeyType, typename ValueType>
-const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::getFirstLeaf() const {
+template<typename KeyType, typename ValueType, typename Allocator>
+const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType, Allocator>::getFirstLeaf() const {
     if (!root) return nullptr;
 
     const Node<KeyType, ValueType>* current = root;
@@ -1667,8 +1736,8 @@ const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::getFirstLeaf(
     return static_cast<const LeafNode<KeyType, ValueType>*>(current);
 }
 
-template<typename KeyType, typename ValueType>
-LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::getLastLeaf() {
+template<typename KeyType, typename ValueType, typename Allocator>
+LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType, Allocator>::getLastLeaf() {
     if (!root) return nullptr;
 
     Node<KeyType, ValueType>* current = root;
@@ -1684,8 +1753,8 @@ LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::getLastLeaf() {
     return static_cast<LeafNode<KeyType, ValueType>*>(current);
 }
 
-template<typename KeyType, typename ValueType>
-const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::getLastLeaf() const {
+template<typename KeyType, typename ValueType, typename Allocator>
+const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType, Allocator>::getLastLeaf() const {
     if (!root) return nullptr;
 
     const Node<KeyType, ValueType>* current = root;
@@ -1702,9 +1771,9 @@ const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType>::getLastLeaf()
 }
 
 // Bulk loading implementation
-template<typename KeyType, typename ValueType>
+template<typename KeyType, typename ValueType, typename Allocator>
 template<typename InputIterator>
-void BPlusTree<KeyType, ValueType>::bulkLoad(InputIterator first, InputIterator last) {
+void BPlusTree<KeyType, ValueType, Allocator>::bulkLoad(InputIterator first, InputIterator last) {
     // Clear existing tree if any
     if (root) {
         destroyTree(root);
@@ -1758,8 +1827,7 @@ void BPlusTree<KeyType, ValueType>::bulkLoad(InputIterator first, InputIterator 
     try {
         size_t elementIndex = 0;
         for (size_t leafIdx = 0; leafIdx < numLeaves; ++leafIdx) {
-            LeafNode<KeyType, ValueType>* newLeaf =
-                new LeafNode<KeyType, ValueType>(maxKeys);
+            LeafNode<KeyType, ValueType>* newLeaf = allocateLeafNode();
             leaves.push_back(newLeaf);
 
             // Link to previous leaf
@@ -1834,8 +1902,7 @@ void BPlusTree<KeyType, ValueType>::bulkLoad(InputIterator first, InputIterator 
             // Build internal nodes with distributed children
             size_t childIndex = 0;
             for (size_t nodeIdx = 0; nodeIdx < numInternalNodes; ++nodeIdx) {
-                InternalNode<KeyType, ValueType>* newInternal =
-                    new InternalNode<KeyType, ValueType>(maxKeys);
+                InternalNode<KeyType, ValueType>* newInternal = allocateInternalNode();
                 nextLevel.push_back(newInternal);
 
                 // Calculate how many children this node should get
@@ -1875,7 +1942,7 @@ void BPlusTree<KeyType, ValueType>::bulkLoad(InputIterator first, InputIterator 
     } catch (...) {
         // Clean up all allocated nodes on exception
         for (auto* leaf : leaves) {
-            delete leaf;
+            deallocateLeafNode(leaf);
         }
         root = nullptr;
         throw;
@@ -1890,8 +1957,8 @@ namespace detail {
     constexpr uint32_t BPTREE_VERSION = 1;
 }
 
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::save(const std::string& filename) const {
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::save(const std::string& filename) const {
     // Compile-time check for trivially copyable types
     static_assert(std::is_trivially_copyable<KeyType>::value,
                   "KeyType must be trivially copyable for binary serialization. "
@@ -1942,8 +2009,8 @@ void BPlusTree<KeyType, ValueType>::save(const std::string& filename) const {
     file.close();
 }
 
-template<typename KeyType, typename ValueType>
-void BPlusTree<KeyType, ValueType>::load(const std::string& filename) {
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::load(const std::string& filename) {
     // Compile-time check for trivially copyable types
     static_assert(std::is_trivially_copyable<KeyType>::value,
                   "KeyType must be trivially copyable for binary serialization. "
@@ -2015,8 +2082,9 @@ void BPlusTree<KeyType, ValueType>::load(const std::string& filename) {
     bulkLoad(std::move(data));
 }
 
-template<typename KeyType, typename ValueType>
-BPlusTree<KeyType, ValueType> BPlusTree<KeyType, ValueType>::loadFromFile(const std::string& filename) {
+template<typename KeyType, typename ValueType, typename Allocator>
+BPlusTree<KeyType, ValueType, Allocator>
+BPlusTree<KeyType, ValueType, Allocator>::loadFromFile(const std::string& filename) {
     // Compile-time check for trivially copyable types
     static_assert(std::is_trivially_copyable<KeyType>::value,
                   "KeyType must be trivially copyable for binary serialization. "
@@ -2077,10 +2145,53 @@ BPlusTree<KeyType, ValueType> BPlusTree<KeyType, ValueType>::loadFromFile(const 
     }
 
     // Create tree with the order from the file
-    BPlusTree<KeyType, ValueType> tree(fileOrder);
+    BPlusTree<KeyType, ValueType, Allocator> tree(fileOrder);
     tree.bulkLoad(std::move(data));
 
     return tree;
+}
+
+// Allocator helper method implementations
+template<typename KeyType, typename ValueType, typename Allocator>
+LeafNode<KeyType, ValueType>*
+BPlusTree<KeyType, ValueType, Allocator>::allocateLeafNode() {
+    LeafNode<KeyType, ValueType>* node = LeafNodeAllocTraits::allocate(leaf_allocator, 1);
+    try {
+        LeafNodeAllocTraits::construct(leaf_allocator, node, maxKeys);
+    } catch (...) {
+        LeafNodeAllocTraits::deallocate(leaf_allocator, node, 1);
+        throw;
+    }
+    return node;
+}
+
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::deallocateLeafNode(LeafNode<KeyType, ValueType>* node) {
+    if (node) {
+        LeafNodeAllocTraits::destroy(leaf_allocator, node);
+        LeafNodeAllocTraits::deallocate(leaf_allocator, node, 1);
+    }
+}
+
+template<typename KeyType, typename ValueType, typename Allocator>
+InternalNode<KeyType, ValueType>*
+BPlusTree<KeyType, ValueType, Allocator>::allocateInternalNode() {
+    InternalNode<KeyType, ValueType>* node = InternalNodeAllocTraits::allocate(internal_allocator, 1);
+    try {
+        InternalNodeAllocTraits::construct(internal_allocator, node, maxKeys);
+    } catch (...) {
+        InternalNodeAllocTraits::deallocate(internal_allocator, node, 1);
+        throw;
+    }
+    return node;
+}
+
+template<typename KeyType, typename ValueType, typename Allocator>
+void BPlusTree<KeyType, ValueType, Allocator>::deallocateInternalNode(InternalNode<KeyType, ValueType>* node) {
+    if (node) {
+        InternalNodeAllocTraits::destroy(internal_allocator, node);
+        InternalNodeAllocTraits::deallocate(internal_allocator, node, 1);
+    }
 }
 
 } // namespace bptree
