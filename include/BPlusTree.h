@@ -3,6 +3,7 @@
 
 #include "Node.h"
 #include "Config.h"
+#include <cstddef>
 #include <iostream>
 #include <fstream>
 #include <vector>
@@ -17,6 +18,69 @@
 #include <memory>
 
 namespace bptree {
+
+/**
+ * @brief Statistics tracking structure for B+ tree metrics
+ *
+ * Tracks various operational and structural metrics for the B+ tree including
+ * operation counts, node counts, and rebalancing statistics.
+ */
+struct Statistics {
+    // Node counts
+    std::size_t leafNodeCount = 0;        ///< Current number of leaf nodes
+    std::size_t internalNodeCount = 0;    ///< Current number of internal nodes
+
+    // Operation counters
+    std::size_t insertCount = 0;          ///< Total insert operations
+    std::size_t removeCount = 0;          ///< Total remove operations (successful)
+    std::size_t searchCount = 0;          ///< Total search operations
+    std::size_t searchHitCount = 0;       ///< Successful search operations
+
+    // Rebalancing counters
+    std::size_t leafSplitCount = 0;       ///< Number of leaf node splits
+    std::size_t internalSplitCount = 0;   ///< Number of internal node splits
+    std::size_t leafMergeCount = 0;       ///< Number of leaf node merges
+    std::size_t internalMergeCount = 0;   ///< Number of internal node merges
+    std::size_t redistributeCount = 0;    ///< Number of redistribute operations
+
+    /**
+     * @brief Returns total number of nodes in the tree
+     */
+    std::size_t totalNodeCount() const noexcept {
+        return leafNodeCount + internalNodeCount;
+    }
+
+    /**
+     * @brief Returns total number of split operations
+     */
+    std::size_t totalSplitCount() const noexcept {
+        return leafSplitCount + internalSplitCount;
+    }
+
+    /**
+     * @brief Returns total number of merge operations
+     */
+    std::size_t totalMergeCount() const noexcept {
+        return leafMergeCount + internalMergeCount;
+    }
+
+    /**
+     * @brief Resets all statistics counters to zero
+     */
+    void reset() noexcept {
+        leafNodeCount = 0;
+        internalNodeCount = 0;
+        insertCount = 0;
+        removeCount = 0;
+        searchCount = 0;
+        searchHitCount = 0;
+        leafSplitCount = 0;
+        internalSplitCount = 0;
+        leafMergeCount = 0;
+        internalMergeCount = 0;
+        redistributeCount = 0;
+    }
+};
 
 // Forward declaration
 template<typename KeyType, typename ValueType, typename Allocator>
@@ -366,6 +430,9 @@ private:
     LeafNodeAllocator leaf_allocator;
     InternalNodeAllocator internal_allocator;
 
+    // Statistics tracking
+    mutable Statistics stats;
+
     // Helper functions
     LeafNode<KeyType, ValueType>* findLeaf(const KeyType& key);
     const LeafNode<KeyType, ValueType>* findLeaf(const KeyType& key) const;
@@ -584,6 +651,81 @@ public:
      * Exception safety: No-throw guarantee
      */
     bool isEmpty() const { return root == nullptr; }
+
+    // ==================== Statistics Methods ====================
+
+    /**
+     * @brief Returns a copy of the current statistics
+     *
+     * @return Statistics object containing all tracked metrics
+     *
+     * Time complexity: O(1)
+     * Exception safety: No-throw guarantee
+     */
+    Statistics getStatistics() const noexcept { return stats; }
+
+    /**
+     * @brief Returns a const reference to the current statistics
+     *
+     * @return Const reference to the Statistics object
+     *
+     * Time complexity: O(1)
+     * Exception safety: No-throw guarantee
+     */
+    const Statistics& statistics() const noexcept { return stats; }
+
+    /**
+     * @brief Resets all statistics counters to zero
+     *
+     * Note: This only resets operation counters (insert, remove, search,
+     * split, merge, redistribute). Node counts are NOT reset as they
+     * represent the current tree state.
+     *
+     * Time complexity: O(1)
+     * Exception safety: No-throw guarantee
+     */
+    void resetStatistics() noexcept {
+        // Preserve node counts as they reflect actual tree state
+        size_t leafCount = stats.leafNodeCount;
+        size_t internalCount = stats.internalNodeCount;
+        stats.reset();
+        stats.leafNodeCount = leafCount;
+        stats.internalNodeCount = internalCount;
+    }
+
+    /**
+     * @brief Returns the total number of key-value pairs in the tree
+     *
+     * @return Number of elements stored in the tree
+     *
+     * Time complexity: O(n/B) where n is number of elements and B is keys per leaf
+     * Exception safety: No-throw guarantee
+     */
+    size_t size() const noexcept;
+
+    /**
+     * @brief Calculates the average fill factor of leaf nodes
+     *
+     * Fill factor is the ratio of actual keys to maximum capacity.
+     * A fill factor of 1.0 means all leaf nodes are completely full.
+     * A fill factor near 0.5 is typical after many random operations.
+     *
+     * @return Average fill factor (0.0 to 1.0), or 0.0 if tree is empty
+     *
+     * Time complexity: O(L) where L is the number of leaf nodes
+     * Exception safety: No-throw guarantee
+     */
+    double averageLeafFillFactor() const noexcept;
+
+    /**
+     * @brief Calculates the average fill factor of internal nodes
+     *
+     * @return Average fill factor (0.0 to 1.0), or 0.0 if tree has no internal nodes
+     *
+     * Time complexity: O(I) where I is the number of internal nodes
+     * Exception safety: No-throw guarantee
+     */
+    double averageInternalFillFactor() const noexcept;
 
     /**
      * @brief Efficiently constructs the tree from sorted data using bulk loading
@@ -910,11 +1052,13 @@ BPlusTree<KeyType, ValueType, Allocator>::BPlusTree(BPlusTree&& other) noexcept(
     std::is_nothrow_move_constructible<InternalNodeAllocator>::value)
     : root(other.root), order(other.order), maxKeys(other.maxKeys), minKeys(other.minKeys),
       leaf_allocator(std::move(other.leaf_allocator)),
-      internal_allocator(std::move(other.internal_allocator)) {
+      internal_allocator(std::move(other.internal_allocator)),
+      stats(other.stats) {
     other.root = nullptr;
     other.order = DEFAULT_ORDER;
     other.maxKeys = DEFAULT_ORDER - 1;
     other.minKeys = (DEFAULT_ORDER + 1) / 2 - 1;
+    other.stats.reset();
 }
 
 // Move assignment operator
@@ -924,7 +1068,7 @@ BPlusTree<KeyType, ValueType, Allocator>::operator=(BPlusTree&& other) noexcept(
     std::allocator_traits<LeafNodeAllocator>::propagate_on_container_move_assignment::value ||
     std::allocator_traits<LeafNodeAllocator>::is_always_equal::value) {
     if (this != &other) {
-        // Clean up existing tree
+        // Clean up existing tree (stats will be updated via deallocate methods)
         destroyTree(root);
 
         // Handle allocator propagation
@@ -939,12 +1083,14 @@ BPlusTree<KeyType, ValueType, Allocator>::operator=(BPlusTree&& other) noexcept(
         order = other.order;
         maxKeys = other.maxKeys;
         minKeys = other.minKeys;
+        stats = other.stats;
 
         // Reset other to empty state
         other.root = nullptr;
         other.order = DEFAULT_ORDER;
         other.maxKeys = DEFAULT_ORDER - 1;
         other.minKeys = (DEFAULT_ORDER + 1) / 2 - 1;
+        other.stats.reset();
     }
     return *this;
 }
@@ -973,10 +1119,15 @@ void BPlusTree<KeyType, ValueType, Allocator>::destroyTree(Node<KeyType, ValueTy
 // Search operation
 template<typename KeyType, typename ValueType, typename Allocator>
 bool BPlusTree<KeyType, ValueType, Allocator>::search(const KeyType& key, ValueType& value) const {
+    stats.searchCount++;
     if (!root) return false;
 
     const LeafNode<KeyType, ValueType>* leaf = findLeaf(key);
-    return leaf->findValue(key, value);
+    bool found = leaf->findValue(key, value);
+    if (found) {
+        stats.searchHitCount++;
+    }
+    return found;
 }
 
 template<typename KeyType, typename ValueType, typename Allocator>
@@ -1014,6 +1165,8 @@ const LeafNode<KeyType, ValueType>* BPlusTree<KeyType, ValueType, Allocator>::fi
 // Insert operation
 template<typename KeyType, typename ValueType, typename Allocator>
 void BPlusTree<KeyType, ValueType, Allocator>::insert(const KeyType& key, const ValueType& value) {
+    stats.insertCount++;
+
     // Empty tree case
     if (!root) {
         root = allocateLeafNode();
@@ -1045,6 +1198,8 @@ void BPlusTree<KeyType, ValueType, Allocator>::insert(const KeyType& key, const 
 
 template<typename KeyType, typename ValueType, typename Allocator>
 void BPlusTree<KeyType, ValueType, Allocator>::splitLeaf(LeafNode<KeyType, ValueType>* leaf) {
+    stats.leafSplitCount++;
+
     // Create new leaf node
     LeafNode<KeyType, ValueType>* newLeaf = nullptr;
 
@@ -1080,12 +1235,15 @@ void BPlusTree<KeyType, ValueType, Allocator>::splitLeaf(LeafNode<KeyType, Value
     } catch (...) {
         // If an exception occurs, clean up the new leaf
         if (newLeaf) deallocateLeafNode(newLeaf);
+        stats.leafSplitCount--;  // Revert the count on failure
         throw; // Re-throw the exception
     }
 }
 
 template<typename KeyType, typename ValueType, typename Allocator>
 void BPlusTree<KeyType, ValueType, Allocator>::splitInternal(InternalNode<KeyType, ValueType>* node) {
+    stats.internalSplitCount++;
+
     // Create new internal node
     InternalNode<KeyType, ValueType>* newNode = nullptr;
 
@@ -1140,6 +1298,7 @@ void BPlusTree<KeyType, ValueType, Allocator>::splitInternal(InternalNode<KeyTyp
             node->numKeys = numOriginalChildren - 1;
             deallocateInternalNode(newNode);
         }
+        stats.internalSplitCount--;  // Revert the count on failure
         throw; // Re-throw the exception
     }
 }
@@ -1197,6 +1356,8 @@ bool BPlusTree<KeyType, ValueType, Allocator>::remove(const KeyType& key) {
     }
 
     if (!found) return false;  // Key not found
+
+    stats.removeCount++;
 
     // Remove the key
     leaf->removeAt(pos);
@@ -1318,6 +1479,7 @@ void BPlusTree<KeyType, ValueType, Allocator>::mergeNodes(
     bool /* isLeftSibling */) {
 
     if (left->isLeaf()) {
+        stats.leafMergeCount++;
         assert(left->isLeaf() && right->isLeaf() && "Both nodes must be leaves");
         LeafNode<KeyType, ValueType>* leftLeaf =
             static_cast<LeafNode<KeyType, ValueType>*>(left);
@@ -1344,6 +1506,7 @@ void BPlusTree<KeyType, ValueType, Allocator>::mergeNodes(
         // Step 3: Delete the now-empty right leaf
         deallocateLeafNode(rightLeaf);
     } else {
+        stats.internalMergeCount++;
         assert(left->isInternal() && right->isInternal() && "Both nodes must be internal");
         InternalNode<KeyType, ValueType>* leftInternal =
             static_cast<InternalNode<KeyType, ValueType>*>(left);
@@ -1441,6 +1604,7 @@ void BPlusTree<KeyType, ValueType, Allocator>::redistributeNodes(
     int parentIndex,
     bool isLeftSibling) {
 
+    stats.redistributeCount++;
     assert(node->parent && node->parent->isInternal() && "Parent must be internal");
     InternalNode<KeyType, ValueType>* parent =
         static_cast<InternalNode<KeyType, ValueType>*>(node->parent);
@@ -1647,6 +1811,63 @@ size_t BPlusTree<KeyType, ValueType, Allocator>::height() const {
         h++;
     }
     return h;
+}
+
+template<typename KeyType, typename ValueType, typename Allocator>
+size_t BPlusTree<KeyType, ValueType, Allocator>::size() const noexcept {
+    if (!root) return 0;
+
+    size_t count = 0;
+    const LeafNode<KeyType, ValueType>* leaf = getFirstLeaf();
+    while (leaf) {
+        count += leaf->numKeys;
+        leaf = leaf->next;
+    }
+    return count;
+}
+
+template<typename KeyType, typename ValueType, typename Allocator>
+double BPlusTree<KeyType, ValueType, Allocator>::averageLeafFillFactor() const noexcept {
+    if (!root || stats.leafNodeCount == 0) return 0.0;
+
+    size_t totalKeys = 0;
+    const LeafNode<KeyType, ValueType>* leaf = getFirstLeaf();
+    while (leaf) {
+        totalKeys += leaf->numKeys;
+        leaf = leaf->next;
+    }
+
+    return static_cast<double>(totalKeys) /
+           (static_cast<double>(stats.leafNodeCount) * static_cast<double>(maxKeys));
+}
+
+template<typename KeyType, typename ValueType, typename Allocator>
+double BPlusTree<KeyType, ValueType, Allocator>::averageInternalFillFactor() const noexcept {
+    if (!root || stats.internalNodeCount == 0) return 0.0;
+
+    size_t totalKeys = 0;
+    // Use BFS to traverse all internal nodes
+    std::queue<const Node<KeyType, ValueType>*> q;
+    q.push(root);
+
+    while (!q.empty()) {
+        const Node<KeyType, ValueType>* node = q.front();
+        q.pop();
+
+        if (node->isInternal()) {
+            totalKeys += node->numKeys;
+            const InternalNode<KeyType, ValueType>* internal =
+                static_cast<const InternalNode<KeyType, ValueType>*>(node);
+            for (size_t i = 0; i <= node->numKeys; i++) {
+                if (internal->children[i]) {
+                    q.push(internal->children[i]);
+                }
+            }
+        }
+    }
+
+    return static_cast<double>(totalKeys) /
+           (static_cast<double>(stats.internalNodeCount) * static_cast<double>(maxKeys));
 }
 
 template<typename KeyType, typename ValueType, typename Allocator>
@@ -2158,6 +2379,7 @@ BPlusTree<KeyType, ValueType, Allocator>::allocateLeafNode() {
     LeafNode<KeyType, ValueType>* node = LeafNodeAllocTraits::allocate(leaf_allocator, 1);
     try {
         LeafNodeAllocTraits::construct(leaf_allocator, node, maxKeys);
+        stats.leafNodeCount++;
     } catch (...) {
         LeafNodeAllocTraits::deallocate(leaf_allocator, node, 1);
         throw;
@@ -2170,6 +2392,7 @@ void BPlusTree<KeyType, ValueType, Allocator>::deallocateLeafNode(LeafNode<KeyTy
     if (node) {
         LeafNodeAllocTraits::destroy(leaf_allocator, node);
         LeafNodeAllocTraits::deallocate(leaf_allocator, node, 1);
+        stats.leafNodeCount--;
     }
 }
 
@@ -2179,6 +2402,7 @@ BPlusTree<KeyType, ValueType, Allocator>::allocateInternalNode() {
     InternalNode<KeyType, ValueType>* node = InternalNodeAllocTraits::allocate(internal_allocator, 1);
     try {
         InternalNodeAllocTraits::construct(internal_allocator, node, maxKeys);
+        stats.internalNodeCount++;
     } catch (...) {
         InternalNodeAllocTraits::deallocate(internal_allocator, node, 1);
         throw;
@@ -2191,6 +2415,7 @@ void BPlusTree<KeyType, ValueType, Allocator>::deallocateInternalNode(InternalNo
     if (node) {
         InternalNodeAllocTraits::destroy(internal_allocator, node);
         InternalNodeAllocTraits::deallocate(internal_allocator, node, 1);
+        stats.internalNodeCount--;
     }
 }
 
